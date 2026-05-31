@@ -120,19 +120,27 @@ docker compose up -d
 
 # 2. Backend
 cd backend
-cp .env.example .env        # fill in OPENAI_API_KEY
+cp .env.example .env                   # fill in OPENAI_API_KEY
+
+# On Debian/Ubuntu, install the venv package first if needed:
+# sudo apt install python3.12-venv -y
+python3 -m venv .venv
+source .venv/bin/activate
+
 pip install -r requirements.txt
 alembic upgrade head
-uvicorn app.main:app --reload
+uvicorn app.main:app --reload          # runs on http://localhost:8000
 
-# 3. Frontend
+# 3. Frontend (new terminal)
 cd frontend
 cp .env.local.example .env.local
 npm install
-npm run dev
+npm run dev                            # runs on http://localhost:3000
 ```
 
 Open [http://localhost:3000](http://localhost:3000).
+
+> **Note:** Keep the `.venv` active whenever running backend commands. You will see `(.venv)` in your prompt when it is active.
 
 ---
 
@@ -160,6 +168,10 @@ Open [http://localhost:3000](http://localhost:3000).
 
 **One GPT-4o call for full tailoring, one call per section edit.** Section edits are small and fast. The full tailoring call is larger but streams — the user sees output within a second or two. Splitting tailoring into per-section calls would be more granular but slower and more expensive for the first pass.
 
+**Embeddings stored but not yet used for search.** The schema includes a `vector(1536)` column on both `resumes` and `jobs` for future similarity search — e.g. surfacing the most relevant past resume for a new job description. In v1, scoring and tailoring go entirely through GPT-4o structured output, so embeddings are not computed on insert. This is a deliberate deferral, not an oversight.
+
+**Null bytes stripped from PDF text.** Some PDFs embed null bytes (`\x00`) in extracted text — common in phone numbers formatted with certain font encodings. PostgreSQL rejects null bytes in `TEXT` columns, so they are stripped at extraction time. The parsed content is unaffected.
+
 ---
 
 ## Stack
@@ -169,8 +181,26 @@ Open [http://localhost:3000](http://localhost:3000).
 | Frontend | Next.js 15, TypeScript, Tailwind CSS |
 | Backend | FastAPI, Python 3.12 |
 | Database | PostgreSQL 16 + pgvector |
-| AI | OpenAI GPT-4o, text-embedding-3-small |
+| AI | OpenAI GPT-4o |
 | PDF parse | pdfplumber, python-docx |
 | PDF export | WeasyPrint |
 | Cache | Redis |
 | Infra | Docker Compose |
+
+---
+
+## Troubleshooting
+
+**`python3 -m venv` fails with `ensurepip` error**
+```bash
+sudo apt install python3.12-venv -y
+```
+
+**`alembic upgrade head` fails with connection refused**
+Docker isn't running yet. Run `docker compose up -d` first and wait a few seconds for Postgres to be ready.
+
+**CORS error in the browser**
+The backend must be running at `http://localhost:8000` before the frontend can make requests. Check that `uvicorn` started successfully and `http://localhost:8000/health` returns `{"status": "ok"}`.
+
+**PDF upload fails with 422**
+The PDF may be image-based (scanned). `pdfplumber` can only extract text from PDFs with actual text layers. Use a text-based PDF or a DOCX instead.
