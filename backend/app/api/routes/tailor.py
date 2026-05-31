@@ -1,7 +1,8 @@
+import io
 import json
 import uuid
 from fastapi import APIRouter, Depends, Header, HTTPException
-from fastapi.responses import StreamingResponse
+from fastapi.responses import StreamingResponse, Response
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 from typing import AsyncGenerator
@@ -17,6 +18,7 @@ from app.schemas.tailor import (
 )
 from app.schemas.resume import ParsedResume
 from app.schemas.job import ScoreDetails
+from app.services.pdf_service import render_pdf
 from app.services.tailor_service import (
     stream_tailored_resume,
     save_tailored_resume,
@@ -159,4 +161,29 @@ async def revert_edit(
         section_name=edit.section_name,
         revised_content=original,
         edit_id=edit.id,
+    )
+
+
+@router.get("/{tailored_resume_id}/pdf")
+async def download_pdf(
+    tailored_resume_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+):
+    result = await db.execute(
+        select(TailoredResume).where(TailoredResume.id == tailored_resume_id)
+    )
+    tailored = result.scalar_one_or_none()
+    if not tailored:
+        raise HTTPException(status_code=404, detail="Tailored resume not found.")
+
+    pdf_bytes = render_pdf(tailored)
+
+    name = tailored.sections.get("contact", {}).get("name", "resume")
+    safe_name = "".join(c if c.isalnum() or c in (" ", "-") else "" for c in name).strip()
+    filename = f"{safe_name or 'resume'}_tailored.pdf"
+
+    return Response(
+        content=pdf_bytes,
+        media_type="application/pdf",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
     )

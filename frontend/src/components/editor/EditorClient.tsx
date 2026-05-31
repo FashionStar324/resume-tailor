@@ -140,7 +140,9 @@ export function EditorClient({ tailoredResumeId }: Props) {
         <div className="flex items-center gap-3">
           <span className="text-sm font-semibold text-neutral-900">Resume Tailer</span>
           <a
-            href={`/api/tailor/${tailoredResumeId}/pdf`}
+            href={`${process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000"}/api/tailor/${tailoredResumeId}/pdf`}
+            target="_blank"
+            rel="noopener noreferrer"
             className="flex items-center gap-1.5 rounded-lg bg-neutral-900 px-3 py-2 text-xs font-semibold text-white hover:bg-neutral-700"
           >
             <Download className="h-3.5 w-3.5" /> Download PDF
