@@ -84,14 +84,12 @@ async def create_job_and_score(
 
     parsed_requirements = await parse_job_description(raw_description)
     score = await score_resume_against_job(resume, parsed_requirements)
-    embedding = await get_embedding(raw_description)
 
     job = Job(
         id=uuid.uuid4(),
         session_id=session_id,
         raw_description=raw_description,
         parsed_requirements=parsed_requirements.model_dump(),
-        embedding=embedding,
     )
     db.add(job)
     await db.commit()

@@ -74,15 +74,12 @@ async def parse_and_store_resume(
     # Validate against schema (raises ValidationError on bad output)
     parsed = ParsedResume(**parsed_dict)
 
-    embedding = await get_embedding(raw_text)
-
     resume = Resume(
         id=uuid.uuid4(),
         session_id=session_id,
         filename=filename,
         raw_text=raw_text,
         parsed_sections=parsed.model_dump(),
-        embedding=embedding,
     )
     db.add(resume)
     await db.commit()

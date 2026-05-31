@@ -2,14 +2,19 @@ import io
 from fastapi import UploadFile, HTTPException
 
 
+def _sanitize(text: str) -> str:
+    # Postgres TEXT rejects null bytes; strip them out after PDF extraction
+    return text.replace("\x00", "")
+
+
 async def extract_text(file: UploadFile) -> str:
     content = await file.read()
     filename = file.filename or ""
 
     if filename.endswith(".pdf"):
-        return _extract_pdf(content)
+        return _sanitize(_extract_pdf(content))
     elif filename.endswith(".docx"):
-        return _extract_docx(content)
+        return _sanitize(_extract_docx(content))
     else:
         raise HTTPException(status_code=400, detail="Only PDF and DOCX files are supported.")
 
