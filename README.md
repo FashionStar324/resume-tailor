@@ -2,79 +2,174 @@
 
 AI-powered resume tailoring with section-level memory.
 
+---
+
 ## Why I built this
 
-In 2023 I built a resume tailoring system professionally. The approach at the time was simple: take the full resume, take the job description, send both to the model, get a rewritten resume back. It worked, but it had a fundamental flaw.
+In 2023 I built a resume tailoring system professionally. The architecture at the time was the obvious one: take the full resume, take the job description, send both to the model, get a rewritten resume back.
 
-When a user wanted to tweak a single bullet point — say, a role description under one specific job — we had to resend the entire document. The model had no memory of the previous tailoring session. Every edit was a cold start. Users got frustrated because small changes caused unintended rewrites elsewhere in the document.
+It worked. But it had a flaw that only became clear after watching real users interact with it.
 
-The other problem: a bullet point under "Staff Engineer at Stripe" means something categorically different from the same bullet under "Summer Intern at a Startup." Full-document resends lose that hierarchy. The model optimizes the document globally instead of understanding the positional context of each section.
+When someone wanted to tweak a single bullet — say, reframe one role description to better emphasize leadership — we had to resend the entire document. The model had no memory of the previous tailoring session. Every edit was a cold start. Users would adjust one thing and find that unrelated sections had quietly shifted. Trust eroded.
+
+There was a second, subtler problem. A bullet point under **"Staff Engineer at Stripe"** means something categorically different from the same bullet under **"Summer Intern at a Startup."** Full-document resends collapse that hierarchy. The model optimizes globally instead of understanding where in the document it is and what the surrounding context implies about the candidate.
+
+This is a rebuild of that system — same domain, better architecture — using what I learned from shipping the original.
+
+---
 
 ## What I did differently
 
-This version is built around **section-level memory**. The tailored resume is stored as a structured JSON document — not a blob of text. When a user wants to revise one section, only that section is sent to the model, but the full resume JSON is included as context. The model knows where it is in the document, what came before, and what the job requires.
+The tailored resume is stored as **structured JSON**, not a blob of text:
 
-Each edit is stored as a diff — original content, user note, revised content. You can revert any section to a previous state. The document builds up incrementally, section by section, rather than being regenerated wholesale each time.
+```json
+{
+  "contact": { "name": "...", "email": "...", ... },
+  "summary": "...",
+  "experience": [
+    { "company": "Stripe", "role": "Staff Engineer", "bullets": [...] },
+    { "company": "Startup", "role": "Intern", "bullets": [...] }
+  ],
+  "skills": { "languages": [...], "frameworks": [...], "tools": [...] },
+  "projects": [...],
+  "education": [...]
+}
+```
+
+When a user edits a section, only that section is sent to the model — but the **full resume JSON is included as read-only context**. The model knows it is rewriting the Stripe role, not the intern role. It knows what comes before and after. It cannot accidentally drift other sections because the prompt only asks for one section back.
+
+Each edit is stored as a diff: original content, user note, revised content. Any section can be reverted to any prior state. The document builds incrementally rather than being regenerated wholesale on every change.
+
+---
 
 ## Architecture
 
 ```
-frontend/          Next.js 15, TypeScript, Tailwind, shadcn/ui
-backend/           FastAPI, SQLAlchemy async, Alembic
-                   PostgreSQL + pgvector (single DB, no separate vector store)
-                   OpenAI GPT-4o for parsing, scoring, and tailoring
+frontend/   Next.js 15 (App Router), TypeScript, Tailwind CSS
+backend/    FastAPI, Python 3.12, SQLAlchemy async, Alembic
+database/   PostgreSQL 16 + pgvector
+ai/         OpenAI GPT-4o (parse, score, tailor, edit)
+cache/      Redis (rate limiting)
+pdf/        WeasyPrint (server-side PDF generation)
 ```
 
-**Why pgvector over Pinecone:** At the scale of a personal tool, running a separate vector database is operational overhead with no benefit. pgvector inside Postgres means one fewer service to run, one fewer connection to manage, and transactional consistency between the resume text and its embedding.
+### Why pgvector over Pinecone
 
-**Why FastAPI over Node for the backend:** The AI calls are I/O-bound and async throughout. Python gives direct access to pdfplumber and python-docx without FFI overhead. The OpenAI SDK is first-class in Python.
+At this scale, running a separate vector database is operational overhead with no practical benefit. pgvector inside Postgres means one service, one connection pool, and transactional consistency between the resume text and its embedding. The similarity search runs in the same query as everything else.
 
-**Why structured section JSON instead of raw text:** Enables section-level diffing, partial edits, version history, and clean PDF generation from a template. Raw text storage makes all of these harder.
+### Why structured JSON over raw text
 
-## Tradeoffs I made
+Raw text storage makes section-level diffing, partial edits, version history, and PDF generation from a template all significantly harder. The JSON schema is the load-bearing piece of the architecture — everything else is built on top of it.
 
-- **PDF fidelity vs. ATS optimization:** The output PDF uses a clean fixed template, not a replica of the uploaded design. This is intentional — ATS systems parse structured text, not decorative layouts.
-- **No fine-tuning:** Prompt engineering with GPT-4o is sufficient at this scale. Fine-tuning would require labeled data and retraining cycles that don't make sense for a personal tool.
-- **Session-based auth for v1:** No account system in the initial version. Resumes are scoped to a session ID stored in a cookie. Auth is a v2 concern.
+### Why FastAPI over Node for the backend
+
+The AI calls are I/O-bound and async throughout. Python gives first-class access to `pdfplumber`, `python-docx`, and the OpenAI SDK. There is no FFI overhead and no impedance mismatch between the model output and the application data structures.
+
+---
+
+## Data model
+
+```
+resumes          — raw text, parsed JSON sections, embedding
+jobs             — raw description, parsed requirements, embedding
+tailored_resumes — sections JSON, score, score breakdown, version
+section_edits    — section name, user note, original, revised (per-edit history)
+```
+
+The `section_edits` table is what enables revert. Every edit writes a row. Reverting applies the stored `original_content` back to `tailored_resumes.sections` and patches the section in place.
+
+---
+
+## Scoring
+
+Match score is structured across three dimensions:
+
+| Dimension | Weight | What it measures |
+|---|---|---|
+| `keyword_match` | 40% | Required skills present in resume |
+| `experience_alignment` | 35% | Seniority, domain, years of experience |
+| `impact_language` | 25% | Metrics, scale, outcomes in bullets |
+
+The `missing` array from the score drives what the tailoring step focuses on — it is the bridge between diagnosis and fix.
+
+---
+
+## API
+
+| Method | Path | Description |
+|---|---|---|
+| `POST` | `/api/resumes/upload` | Upload PDF or DOCX, returns parsed sections |
+| `GET` | `/api/resumes/{id}` | Fetch a parsed resume |
+| `POST` | `/api/jobs/score` | Score a resume against a job description |
+| `POST` | `/api/tailor/stream` | Tailor a resume, SSE stream |
+| `GET` | `/api/tailor/{id}` | Fetch a tailored resume |
+| `GET` | `/api/tailor/{id}/pdf` | Download as ATS-optimized PDF |
+| `POST` | `/api/tailor/edit` | Revise one section with a note |
+| `GET` | `/api/tailor/{id}/history` | Full edit log, newest first |
+| `POST` | `/api/tailor/edit/{edit_id}/revert` | Restore a section to before a specific edit |
+
+---
 
 ## Local setup
 
+**Prerequisites:** Docker, Python 3.12, Node 20
+
 ```bash
-# Start Postgres + Redis
+# 1. Start Postgres + Redis
 docker compose up -d
 
-# Backend
+# 2. Backend
 cd backend
-cp .env.example .env   # add your OPENAI_API_KEY
+cp .env.example .env        # fill in OPENAI_API_KEY
 pip install -r requirements.txt
 alembic upgrade head
 uvicorn app.main:app --reload
 
-# Frontend
+# 3. Frontend
 cd frontend
+cp .env.local.example .env.local
 npm install
 npm run dev
 ```
 
 Open [http://localhost:3000](http://localhost:3000).
 
-## Features
+---
 
-- Upload a resume (PDF or DOCX)
-- Paste a job description and get a structured match score
-- Tailor the full resume to the job in one click
-- Edit any section with a plain-English note — only that section is revised
-- Download the final result as a clean ATS-optimized PDF
-- Full edit history with per-section revert
+## Usage
+
+1. **Upload** a resume (PDF or DOCX)
+2. **Paste** a job description and click **Analyze Match**
+3. Review the structured score — keyword gaps, strengths, suggestions
+4. Click **Tailor My Resume** — streams the rewrite in real time
+5. In the editor, hover any section and click **Edit**
+6. Type a plain-English instruction: *"Emphasize the Kubernetes migration I led"*
+7. Only that section is revised — everything else stays
+8. Use **Edit History** to revert any section to a previous state
+9. **Download PDF** — clean, ATS-optimized, named after the candidate
+
+---
+
+## Tradeoffs
+
+**PDF fidelity vs. ATS optimization.** The output PDF uses a fixed template, not a replica of the uploaded design. ATS systems parse structured text; decorative layouts often confuse them. The template is a deliberate choice, not a limitation.
+
+**No fine-tuning.** Prompt engineering with GPT-4o is sufficient at this scale. Fine-tuning would require labeled data and retraining cycles that do not make sense for a personal tool.
+
+**Session-based auth.** No account system in v1. Resumes are scoped to a session ID stored in a cookie. This ships faster and covers the core use case. Auth is a v2 concern.
+
+**One GPT-4o call for full tailoring, one call per section edit.** Section edits are small and fast. The full tailoring call is larger but streams — the user sees output within a second or two. Splitting tailoring into per-section calls would be more granular but slower and more expensive for the first pass.
+
+---
 
 ## Stack
 
 | Layer | Technology |
-|-------|-----------|
-| Frontend | Next.js 15, TypeScript, Tailwind CSS, shadcn/ui |
+|---|---|
+| Frontend | Next.js 15, TypeScript, Tailwind CSS |
 | Backend | FastAPI, Python 3.12 |
 | Database | PostgreSQL 16 + pgvector |
-| AI | OpenAI GPT-4o |
+| AI | OpenAI GPT-4o, text-embedding-3-small |
 | PDF parse | pdfplumber, python-docx |
 | PDF export | WeasyPrint |
 | Cache | Redis |
